@@ -23,7 +23,7 @@ shape_dict = {"pixel_values": input_shape}
 # 转换为 TVM Relay IR
 start_time = time.perf_counter()
 try:
-    mod, params = relay.frontend.from_onnx(onnx_model, shape_dict)
+    mod, params = relay.frontend.from_onnx(onnx_model, shape_dict)  #, 
     mod = transform.InferType()(mod)
 except Exception as e:
     print(f"转换 ONNX 到 Relay IR 失败: {e}")

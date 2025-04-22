@@ -178,6 +178,28 @@ start_time = time.perf_counter()
 logits = outputs[0]
 pred_boxes = outputs[1]
 
+def nms(boxes, scores, iou_threshold=0.5):
+    """非极大值抑制"""
+    if boxes.size == 0:
+        return np.array([], dtype=np.int64)
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    areas = (x2 - x1) * (y2 - y1)
+    order = scores.argsort()[::-1]
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        w = np.maximum(0, xx2 - xx1)
+        h = np.maximum(0, yy2 - yy1)
+        iou = w * h / (areas[i] + areas[order[1:]] - w * h + 1e-10)
+        inds = np.where(iou <= iou_threshold)[0]
+        order = order[inds + 1]
+    return np.array(keep, dtype=np.int64)
+
 def custom_post_process_object_detection(logits, pred_boxes, target_sizes, threshold=0.5, num_labels=12):
     import numpy as np
     # 转换为概率
@@ -204,6 +226,13 @@ def custom_post_process_object_detection(logits, pred_boxes, target_sizes, thres
         x2 = (center_x + width / 2) * target_width
         y2 = (center_y + height / 2) * target_height
         boxes = np.stack([x1, y1, x2, y2], axis=-1)
+
+        # 应用 NMS
+        keep_indices = nms(boxes, scores, iou_threshold=0.5)
+        scores = scores[keep_indices]
+        labels = labels[keep_indices]
+        boxes = boxes[keep_indices]    
+        
     else:
         boxes = np.array([]).reshape(0, 4)
     
