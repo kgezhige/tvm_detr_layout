@@ -6,14 +6,14 @@ import tvm.runtime
 from tvm.contrib import graph_executor
 import onnx
 import numpy as np
-from transformers import AutoImageProcessor
+from transformers import AutoImageProcessor, DetrConfig
 from PIL import Image
 import matplotlib.pyplot as plt
 import os
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # 设置目标（可通过变量选择）
-target = "llvm"  # 选项：llvm, cuda, opencl
+target = "cuda"  # 选项：llvm, cuda, opencl
 
 # 目标到设备的映射
 target_device_map = {
@@ -39,10 +39,12 @@ except Exception as e:
 end_time = time.perf_counter()
 print(f"Load image processor time: {end_time - start_time:.4f} seconds")
 
+
+
 # 加载图像
 start_time = time.perf_counter()
 try:
-    img = Image.open("./Pics/ta3.jpeg").convert("RGB")
+    img = Image.open("./Pics/3.png").convert("RGB")
 except Exception as e:
     print(f"加载图像失败: {e}")
     exit(1)
@@ -84,31 +86,31 @@ except Exception as e:
     exit(1)
 end_time = time.perf_counter()
 print(f"Convert ONNX to Relay IR time: {end_time - start_time:.4f} seconds")
+tuning_log = f"tvm_tuning_{target}.log"
 
 # TVM 算子调优
-tuning_log = f"tvm_tuning_{target}.log"
-if not os.path.exists(tuning_log):
-    print(f"运行算子调优 ({target})...")
-    tasks = autotvm.task.extract_from_program(mod["main"], target=target, params=params)
-    for i, task in enumerate(tasks):
-        print(f"调优任务 {i+1}/{len(tasks)}: {task.name}")
-        tuner = autotvm.tuner.XGBTuner(task)
-        tuner.tune(
-            n_trial=20,  # 调优次数（可增加）
-            measure_option=autotvm.measure_option(
-                builder=autotvm.LocalBuilder(),
-                runner=autotvm.LocalRunner(number=5)
-            ),
-            callbacks=[autotvm.callback.log_to_file(tuning_log)]
-        )
-    print(f"调优完成，日志保存至: {tuning_log}")
+# if not os.path.exists(tuning_log):
+#     print(f"运行算子调优 ({target})...")
+#     tasks = autotvm.task.extract_from_program(mod["main"], target=target, params=params)
+#     for i, task in enumerate(tasks):
+#         print(f"调优任务 {i+1}/{len(tasks)}: {task.name}")
+#         tuner = autotvm.tuner.XGBTuner(task)
+#         tuner.tune(
+#             n_trial=20,  # 调优次数（可增加）
+#             measure_option=autotvm.measure_option(
+#                 builder=autotvm.LocalBuilder(),
+#                 runner=autotvm.LocalRunner(number=5)
+#             ),
+#             callbacks=[autotvm.callback.log_to_file(tuning_log)]
+#         )
+#     print(f"调优完成，日志保存至: {tuning_log}")
 
 # 编译模型
 start_time = time.perf_counter()
 try:
-    with autotvm.apply_history_best(tuning_log):
-        with tvm.transform.PassContext(opt_level=3):
-            lib = relay.build(mod, target=target, params=params)
+    with tvm.transform.PassContext(opt_level=0):
+        target = tvm.target.Target("cuda -arch=sm_75")  # RTX 2080Ti
+        lib = relay.build(mod, target=target, params=params)
     graph_mod = graph_executor.GraphModule(lib["default"](device))
 except Exception as e:
     print(f"编译模型 ({target}) 失败: {e}")
@@ -136,9 +138,10 @@ print(f"Total inference time ({target}): {end_time - start_time:.4f} seconds")
 start_time = time.perf_counter()
 logits = outputs[0]  # [batch, num_queries, num_classes]
 pred_boxes = outputs[1]  # [batch, num_queries, 4]
+print('output --------', len(outputs), logits.shape, pred_boxes.shape, 'logits, pred_boxes')
 
 # 手动后处理（兼容不支持字典的 transformers 版本）
-def custom_post_process_object_detection(logits, pred_boxes, target_sizes, threshold=0.4, num_labels=91):
+def custom_post_process_object_detection(logits, pred_boxes, target_sizes, threshold=0., num_labels=91):
     import numpy as np
     # 转换为概率
     probs = 1 / (1 + np.exp(-logits))  # sigmoid
@@ -162,13 +165,17 @@ def custom_post_process_object_detection(logits, pred_boxes, target_sizes, thres
     }]
     return results
 
+config = DetrConfig.from_pretrained("./")
+id2label = config.id2label
+num_labels = len(id2label)
+print('labels',id2label )
 # 使用自定义后处理
 bbox_pred = custom_post_process_object_detection(
     logits=logits,
     pred_boxes=pred_boxes,
     target_sizes=[img.size[::-1]],
     threshold=0.4,
-    num_labels=len(img_proc.model_config.id2label)
+    num_labels=len(id2label)
 )
 end_time = time.perf_counter()
 print(f"Postprocess time: {end_time - start_time:.4f} seconds")
@@ -184,10 +191,11 @@ for pred in bbox_pred:
     labels = pred["labels"]
     for box, score, label in zip(boxes, scores, labels):
         x1, y1, x2, y2 = box
-        label_name = img_proc.model_config.id2label.get(int(label), "Unknown")
+        label_name = id2label.get(int(label), "Unknown")
         rect = plt.Rectangle((x1, y1), x2-x1, y2-y1, linewidth=2, edgecolor="r", facecolor="none")
         plt.gca().add_patch(rect)
-        plt.text(x1, y1-10, f"{label_name} ({score:.2f})", color="r", fontsize=12, weight="bold")
+        print(f'box {box}, score {score}, label {label}')
+        # plt.text(x1, y1-10, f"{label_name} ({score.item():.2f})", color="r", fontsize=12, weight="bold")
 plt.axis("off")
 plt.show()
 
@@ -195,5 +203,5 @@ plt.show()
 print(f"检测到的边界框和类别 ({target})：")
 for pred in bbox_pred:
     for box, score, label in zip(pred["boxes"], pred["scores"], pred["labels"]):
-        label_name = img_proc.model_config.id2label.get(int(label), "Unknown")
-        print(f"边界框: {box.tolist()}, 类别: {label_name}, 置信度: {score:.2f}")
+        label_name = id2label.get(int(label), "Unknown")
+        print(f"边界框: {box.tolist()}, 类别: {label_name}, 置信度: {score.item():.2f}")
